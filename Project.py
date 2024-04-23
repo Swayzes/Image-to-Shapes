@@ -3,55 +3,30 @@
 
 from segment_anything import sam_model_registry, SamAutomaticMaskGenerator, SamPredictor
 from matplotlib.backends.backend_tkagg import FigureCanvasAgg
-from matplotlib.patches import Polygon, Circle
+from matplotlib.patches import Polygon, Circle, Ellipse
 import PySimpleGUI as sg
 import matplotlib.pyplot as plt
 from PIL import Image
+from PIL import ImageGrab
 import numpy as np
 import os, shutil
 import io
 import cv2
+import torch
 
-from skimage import color, measure, draw, img_as_bool
 from skimage.draw import disk
+from skimage.draw import ellipse as ellipsedraw
 from skimage.draw import polygon as polydraw
-from skimage.measure import label, regionprops, regionprops_table
-from skimage.transform import rotate
+from skimage.measure import regionprops
+from skimage import morphology
 from skimage import filters
 
-#Testing
-def show_mask(mask, ax, random_color=False):
-    if random_color:
-        color = np.concatenate([np.random.random(3), np.array([0.6])], axis=0)
-    else:
-        color = np.array([30/255, 144/255, 255/255, 0.6])
+# 
+def show_mask(mask, ax):
+    color = np.array([30/255, 144/255, 255/255, 0.6])
     h, w = mask.shape[-2:]
     mask_image = mask.reshape(h, w, 1) * color.reshape(1, 1, -1)
     ax.imshow(mask_image)
-    
-def show_anns(anns, axes=None):
-    if len(anns) == 0:
-        return
-    if axes:
-        ax = axes
-    else:
-        ax = plt.gca()
-        ax.set_autoscale_on(False)
-    sorted_anns = sorted(anns, key=(lambda x: x['area']), reverse=True)
-    polygons = []
-    color = []
-    for ann in sorted_anns:
-        m = ann['segmentation']
-        img = np.ones((m.shape[0], m.shape[1], 3))
-        color_mask = np.random.random((1, 3)).tolist()[0]
-        for i in range(3):
-            img[:,:,i] = color_mask[i]
-        ax.imshow(np.dstack((img, m*0.5)))
-
-def show_box(box, ax):
-    x0, y0 = box[0], box[1]
-    w, h = box[2] - box[0], box[3] - box[1]
-    ax.add_patch(plt.Rectangle((x0, y0), w, h, edgecolor='green', facecolor=(0,0,0,0), lw=2))   
 
 # Primary Functions
 def draw_figure(element, figure):
@@ -77,7 +52,16 @@ def draw_figure(element, figure):
         return None
 
 def delete_all_masks():
+    """Deletes all of the mask images in the 'masks' folder"""
     folder = os.path.join(os.getcwd(), "masks")
+    
+    # Checks if a masks folder exists, if it doesn't makes one 
+    if (os.path.isdir(folder)):
+        pass
+    else:
+        os.mkdir(folder)
+    
+    # Deletes the images
     for file in os.listdir(folder):
         file_path = os.path.join(folder, file)
         try:
@@ -89,29 +73,79 @@ def delete_all_masks():
             print('Failed to delete %s. Reason: %s' % (file_path, e))
     return
 
+def save_element_as_file(element, filename):
+    """
+    Saves any element as an image file.  Element needs to have an underlyiong Widget available (almost if not all of them do)
+    
+    :param element: The element to save
+    :param filename: The filename to save to. The extension of the filename determines the format (jpg, png, gif, ?)
+    """
+    widget = element.Widget
+    box = (widget.winfo_rootx(), widget.winfo_rooty(), widget.winfo_rootx() + widget.winfo_width(), widget.winfo_rooty() + widget.winfo_height())
+    grab = ImageGrab.grab(bbox=box)
+    grab.save(filename)
+
 def show_image(im):
+    """
+    Shows an image in a pyplot
+    
+    :param im: An image
+    :return fig: The plot to show
+    """
+    # Sets up the plot
     fig = plt.figure()
     hwc = np.array(im)
     ax1 = fig.add_subplot()
     ax1.set_title("Original Image")
-    ax1.axis("on")
+    # Plot formatting
+    plt.gca().set_position([0, 0, 1, 1])
+    fig.set_size_inches(5, 5)
     ax1.imshow(hwc)
+    ax1.axis('off')
+    ax1.set_aspect('equal')
+    ax1.set_anchor('C')
     return fig
 
-def show_point_fig(im, ilist):
-    hwc = np.array(im)
+def show_point_fig(im, ilist, labels):
+    """
+    Shows the points made in an image
     
+    param im: The inputted image
+    param ilist: The list of points (Coordinates)
+    param labels: The types of points (Binary)
+    """
+    # Plot setup
+    hwc = np.array(im)
     fig = plt.figure()
     ax1 = fig.add_subplot()
-
     ax1.imshow(hwc)
-    ax1.scatter(ilist[:, 0], ilist[:, 1], color='green', marker='*', s=200, edgecolor='white', linewidth=1.25)
-    ax1.set_position([0, 0, 1, 1])
+
+    # Plots the positive and negative points made
+    pos_points = ilist[labels==1]
+    neg_points = ilist[labels==0]
+    ax1.scatter(pos_points[:, 0], pos_points[:, 1], color='green', marker='*', s=200, edgecolor='white', linewidth=1.25)
+    ax1.scatter(neg_points[:, 0], neg_points[:, 1], color='red', marker='*', s=200, edgecolor='white', linewidth=1.25)   
+    
+    # Plot Formatting
     ax1.set_title("Point Locations")
-    #ax1.axis('on')
+    plt.gca().set_position([0, 0, 1, 1])
+    fig.set_size_inches(5, 5)
+    ax1.imshow(im)
+    ax1.axis('off')
+    ax1.set_aspect('equal')
+    ax1.set_anchor('C')
     return fig
 
-def view_mask(ilist, img, masks, scores, logits):
+def view_mask(ilist, img, masks, scores):
+    """
+    Shows the mask made by the points chosen
+    
+    param ilist: The list of points (Coordinates)
+    param img: The inputted image
+    param labels: The types of points (Binary)
+    param masks: The masks made (Binary array)
+    param scores: The scores of the masks compared to the image (Double)
+    """
     fig = plt.figure()
     ax1 = fig.add_subplot()
     best_score = 0
@@ -122,9 +156,21 @@ def view_mask(ilist, img, masks, scores, logits):
             show_mask(mask, plt.gca())
             ax1.scatter(ilist[:, 0], ilist[:, 1], color='green', marker='*', s=200, edgecolor='white', linewidth=1.25)
             ax1.set_title(f"Mask {i+1}, Score: {score:.3f}", fontsize=18)
+            plt.gca().set_position([0, 0, 1, 1])
+            fig.set_size_inches(5, 5)
+            ax1.axis('off')
+            ax1.set_aspect('equal')
+            ax1.set_anchor('C')
     return fig
 
-def add_mask(masks, scores, logits):
+def add_mask(masks, scores):
+    """
+    Gets the best mask from a list of masks
+    
+    param masks: The masks made (Binary array)
+    param scores: The scores of the masks compared to the image (Double)
+    return best_mask: The best mask chosen
+    """
     best_score = 0
     best_mask = ''
     for i, (mask, score) in enumerate(zip(masks, scores)):
@@ -140,12 +186,26 @@ def add_mask(masks, scores, logits):
 
 ## Shape Fitting Functions
 def calculate_IoU(img, comp):
-    overlap = img * comp # Logical AND
-    union = img + comp # Logical OR
+    """
+    Calculates the Intersection over Union of two 'binary' array
+    
+    param img: inputted image (gets a max of 255 for white)
+    param comp: comparison mask (Binary array)
+    """
+    # img is divided by 255 as white needs to be binary
+    overlap = img/255 * comp # Logical AND
+    union = img/255 + comp # Logical OR
     IoU_calc = overlap.sum()/float(union.sum())
     return IoU_calc
 
 def get_contours(im):
+    """
+    Gets the contours and the simple version of an image
+
+    param im: An image
+    return contours: A list of points of the contours
+    return c: the largest contour in the detected contours
+    """
     thresh = cv2.threshold(im, 250, 255, cv2.THRESH_BINARY)[1]
     kernel = np.ones((3,3), np.uint8)
     dilated = cv2.dilate(thresh, kernel, iterations=3)
@@ -154,6 +214,9 @@ def get_contours(im):
     return contours, c
 
 def draw_poly(coords, width, height):
+    """
+    
+    """
     img = np.zeros((height, width), dtype=np.double)
     poly = coords
     # fill polygon
@@ -176,6 +239,21 @@ def draw_circle(im, width, height):
     center = (int(x0), int(y0))
     return img, center, int(r)
 
+def draw_ellipse(im, w, h):
+    contours, cmax = get_contours(im)
+    ellipse = cv2.fitEllipse(contours[0])
+    centerx = ellipse[0][0]
+    centery = ellipse[0][1]
+    ellwidth = ellipse[1][0]/2
+    ellheight = ellipse[1][1]/2
+    angle = ellipse[2]
+
+    img = np.zeros((h, w), dtype=np.double)
+    rr, cc = ellipsedraw(centery, centerx, ellheight, ellwidth, img.shape, rotation=np.deg2rad(angle))
+    img[rr, cc] = 1
+
+    return img, ellipse
+
 def draw_rectangle(im, w, h):    
     contours, cmax = get_contours(im)
     rect = cv2.minAreaRect(cmax)
@@ -188,10 +266,9 @@ def draw_rectangle(im, w, h):
     
     return img, box
 
-def best_IoU(im, width, height):
+def best_IoU(im, width, height, sides):
     contours, cmax = get_contours(im)
-
-    count = 0
+    best_points = 0
     best_poly = 0
     IoU = 0
     for eps in np.linspace(0.001, 0.05, 10):
@@ -201,80 +278,112 @@ def best_IoU(im, width, height):
         approx = cv2.approxPolyDP(cmax, eps * peri, True)
     
         poly = draw_poly(approx, width, height)
-        #poly=approx
-        if len(approx) < 7:
-            overlap = im.copy() * poly # Logical AND
-            union = im.copy() + poly # Logical OR
-            IoU_calc = overlap.sum()/float(union.sum())
+
+        if len(approx) <= sides:
+            IoU_calc = calculate_IoU(im.copy(), poly)
             if IoU_calc > IoU:
-                best_poly = approx
+                best_points = approx
+                best_poly = poly
                 IoU = IoU_calc
         elif eps == 0.05:
-            best_poly = approx
-    return best_poly
+            best_points = np.zeros((1,1))
+            best_poly = np.zeros((height, width), dtype=np.double)
+    return best_poly, best_points
 
 def mask_colour(count):
-    c = np.rint(len(os.listdir("test_masks"))/3)
+    c = np.rint(len(os.listdir("test_masks_convex"))/3)
+    # c = np.rint(len(os.listdir("masks"))/3)
     if count > c*2:
         color = 'green'
-    elif count < c*2 and count > c:
+    elif count <= c*2 and count >= c:
         color = 'red'
     else:
         color = 'blue'
+    # print(c)
     return color
 
-def best_primitive(image):
-    fig, axes = plt.subplots(1,2, figsize=(10, 8))
-    ax = axes.ravel()
+def best_primitive():
+    fig= plt.figure()
+    ax1 = fig.add_subplot()
     count=0
 
-    for file in os.scandir('test_masks'):
-        im = cv2.imread("test_masks/" + str(file.name), 0)
-        w = im.shape[1]
-        h = im.shape[0]
-        rect, box = draw_rectangle(im, w, h)
+    for file in os.scandir('test_masks_convex'):
+        im = cv2.imread("test_masks_convex/" + str(file.name), 0)
+    # for file in os.scandir('masks'):
+    #     im = cv2.imread("masks/" + str(file.name), 0)
+        im = np.array(im)
+        h, w = im.shape
+
         circ, center, r = draw_circle(im, w, h)
-        #triangle = draw_poly(im, w, h, 4)
+        elli, elldata = draw_ellipse(im, w, h)
+        triangle, points = best_IoU(im, w, h, 3)
+        rect, box = draw_rectangle(im, w, h)
+        
+        IoU = [calculate_IoU(im, circ), calculate_IoU(im, elli), calculate_IoU(im, triangle), calculate_IoU(im, rect)]
         
         color = mask_colour(count)
         
-        if calculate_IoU(im, circ) + 0.005  < calculate_IoU(im, rect):
+        # print(IoU)
+        # print(max(IoU))
+        # print("Circle IoU =" + str(calculate_IoU(im, circ)))
+        # print("Ellipse IoU =" + str(calculate_IoU(im, elli)))
+        # print("Rect IoU =" + str(calculate_IoU(im, rect)))
+        # print("Poly IoU =" + str(calculate_IoU(im, triangle)))
+        
+        if max(IoU) == IoU[0]:
+            circle = Circle(center, r)
+            circle.set_edgecolor('0')
+            circle.set_facecolor("red")
+            ax1.add_patch(circle)
+        elif max(IoU) == IoU[1]:
+            # print(elldata)
+            ellipse = Ellipse((elldata[0][0], elldata[0][1]), elldata[1][0], elldata[1][1], angle=elldata[2])
+            ellipse.set_edgecolor('0')
+            ellipse.set_facecolor("white")
+            ax1.add_patch(ellipse)
+        elif max(IoU) == IoU[2]:
+            xs = points[:, :, 0][:,0]
+            ys = points[:, :, 1][:,0]
+            polygon = Polygon([[0, 0], [0, 0]])
+            polygon.set_xy(np.column_stack([xs, ys]))
+            polygon.set_edgecolor('0')
+            polygon.set_facecolor("green")
+            ax1.add_patch(polygon)
+        else:
             xs = box[:,0]
             ys = box[:,1]
             polygon = Polygon([[0, 0], [0, 0]])
             polygon.set_xy(np.column_stack([xs, ys]))
             polygon.set_edgecolor('0')
-            polygon.set_facecolor(color)
-            ax[1].add_patch(polygon)
-        else:
-            circle = Circle(center, r)
-            circle.set_edgecolor('0')
-            circle.set_facecolor(color)
-            ax[1].add_patch(circle)
+            polygon.set_facecolor("blue")
+            ax1.add_patch(polygon)
+
         count = count+1
 
-    ax[0].imshow(image)
-    ax[0].set_title('Input')
-    ax[0].axis('off')
-    ax[1].imshow(im)
-    ax[1].set_title('Output')
-    ax[1].axis('off')
+    plt.gca().set_position([0, 0, 1, 1])
+    fig.set_size_inches(5, 5)
+    ax1.imshow(im)
+    ax1.axis('off')
+    ax1.set_aspect('equal')
+    ax1.set_anchor('C')
+    
     return fig
 
-def best_poly_IoU(image):
-    fig, axes = plt.subplots(1,2, figsize=(10, 8))
-    ax = axes.ravel()
-
+def best_poly_IoU():
+    fig= plt.figure()
+    ax1 = fig.add_subplot()
     count = 0
     #Inside Loop
-    for file in os.scandir('test_masks'):
-        im = cv2.imread("test_masks/" + str(file.name), 0)
-        w = im.shape[1]
-        h = im.shape[0]
-        poly = best_IoU(im, w, h)
+    for file in os.scandir('test_masks_convex'):
+        im = cv2.imread("test_masks_convex/" + str(file.name), 0)
+    # for file in os.scandir('masks'):
+    #     im = cv2.imread("masks/" + str(file.name), 0)
+        h, w = im.shape
+        
+        poly, points = best_IoU(im, w, h, 6)
 
-        xs = poly[:, :, 0][:,0]
-        ys = poly[:, :, 1][:,0]
+        xs = points[:, :, 0][:,0]
+        ys = points[:, :, 1][:,0]
 
         color = mask_colour(count)
 
@@ -282,17 +391,17 @@ def best_poly_IoU(image):
         polygon.set_xy(np.column_stack([xs, ys]))
         polygon.set_edgecolor('0')
         polygon.set_facecolor(color)
-        ax[1].add_patch(polygon)
+        ax1.add_patch(polygon)
 
         count = count+1
     
     # Outside loop   
-    ax[0].imshow(image)
-    ax[0].set_title('Input')
-    ax[0].axis('off')
-    ax[1].imshow(im)
-    ax[1].set_title('Output')
-    ax[1].axis('off')
+    plt.gca().set_position([0, 0, 1, 1])
+    fig.set_size_inches(5, 5)
+    ax1.imshow(im)
+    ax1.axis('off')
+    ax1.set_aspect('equal')
+    ax1.set_anchor('C')
     return fig
 # End of Primary Functions
 
@@ -300,47 +409,48 @@ def best_poly_IoU(image):
 def main():
     ## Consistent Variables
     input_list = []
+    label_list = []
     mask_list = []
     mask_point_string = ''
     mask_list_string = ''
-    maskindex = 1
+    temp_mask = ''
+    temp_scores = ''
     input = ''
+    maskindex = 1
 
+    # Segment anything (SAM Model) preloading
     sam = sam_model_registry['vit_b'](checkpoint='sam_vit_b_01ec64.pth')
-    sam.to(device="cuda")
+    if torch.cuda.is_available():
+        sam.to(device="cuda")
+    else:
+        sam.to(device="cpu")
     predictor = SamPredictor(sam)
     
     #GUI Code
     mask_col = [[sg.Text('Masks', key='-MASKS-')],
-             [sg.Text('', key='-MASK_LIST-')],
-             [sg.Text('X='), sg.Input(key='-XCoord-', size=(10,1)), sg.Text('Y='),sg.Input(key='-YCoord-', size=(10,1)), sg.Button('View Point')],
-             [sg.Button('Add Point'), sg.Button('View Mask')],
-             [sg.Button('Add Mask'), sg.Button('Undo')],
-             [sg.Button('Reset'), sg.Button('Save')]]
-                
-    shape_col = [[sg.Text('Shapes', key='-SHAPES-')],
-             [sg.Button('Best Poly'), sg.Button('Primitive')],
-             [sg.Button('Save Output')]]
+            [sg.Text('', key='-MASK_LIST-')],
+            [sg.Button('Clear'), sg.Button('View Mask'), sg.Button('Add Mask')],
+            [sg.Button('Reset'), sg.Button('Save')]]
+            
+    shape_col =[[sg.Text('Shapes', key='-SHAPES-')],
+            [sg.Button('Best Poly'), sg.Button('Primitive')],
+            [sg.Button('Save Output')]]
 
-    layout = [[sg.Text('Choose an image to process')],
-          [sg.Text('Input'), sg.Input(key='-INPUT-'), sg.FileBrowse()],
-          [sg.Button('Confirm')],
-          [sg.Column(mask_col, key='-MASK_COL-', visible=False), sg.Column(shape_col, key='-SHAPE_COL-', visible=False)],
-          [sg.Image(key='-IMAGE-', enable_events=True)],
-          [sg.Text("Mouse Coord:"), sg.Text(size=20, key='-COORD-')]]
+    layout =   [[sg.Text('Choose an image to process')],
+            [sg.Text('Input'), sg.Input(key='-INPUT-'), sg.FileBrowse()],
+            [sg.Button('Confirm')],
+            # Uncomment this for testing shapes and comment the one with visible=False
+            # [sg.Column(mask_col, key='-MASK_COL-', visible=True), sg.Column(shape_col, key='-SHAPE_COL-', visible=True)],
+            [sg.Column(mask_col, key='-MASK_COL-', visible=False), sg.Column(shape_col, key='-SHAPE_COL-', visible=False)],
+            [sg.Graph(canvas_size=(0,0), graph_bottom_left=(0,0), graph_top_right=(0,0), change_submits=True, key='-IMAGE-', enable_events=True), sg.Image(key='-OUTPUT-')]]
+    
     window = sg.Window("Image to shapes", layout, finalize=True)
 
     input_element = window['-IMAGE-']
-    
-    # layout = [[sg.Text('Choose an image to process')],
-    #       [sg.Text('Input'), sg.Input(key='-INPUT-'), sg.FileBrowse()],
-    #       [sg.Button('Confirm')],
-    #       [sg.Column(mask_col, key='-MASK_COL-', visible=False), sg.Column(shape_col, key='-SHAPE_COL-', visible=False)],
-    #       [sg.Graph(canvas_size=(0,0), graph_bottom_left=(0,0), graph_top_right=(0,0), change_submits=True, key='-IMAGE-', enable_events=True), sg.Image(key='-OUTPUT-')]]
-    # window = sg.Window("Image to shapes", layout, finalize=True)
+    output_element = window['-OUTPUT-']
+    input_element.bind("<Button-3>", "+RIGHT+")
 
-    # input_element = window['-IMAGE-']
-    # output_element = window['-OUTPUT-']
+    #Events
     while True:
         event, values = window.read()
  
@@ -350,159 +460,163 @@ def main():
             window['-SHAPE_COL-'].update(visible=False)
             if values['-INPUT-'] != '':
                 input = Image.open(values['-INPUT-'])
+                #Image Setup
                 input.thumbnail((500,500))
-                # image = sg.EMOJI_BASE64_HAPPY_BIG_SMILE
-                # im = cv2.imread(values['-INPUT-'])
-                #Show the image chosen
-                # temp = np.array(input)
-                # im = Image.fromarray(temp)
-                # buffer = io.BytesIO()
-                # im.save(buffer, format='PNG')
-                # data = buffer.getvalue()
+                temp = np.array(input)
+                im = Image.fromarray(temp)
+                buffer = io.BytesIO()
+                im.save(buffer, format='PNG')
+                data = buffer.getvalue()
 
-                # input_element.set_size((input.width, input.height))
-                # input_element.change_coordinates(graph_bottom_left = (0, input.height) ,graph_top_right = (input.width, 0))
-                # input_element.draw_image(data=data, location=(0,0))
-                draw_figure(input_element, show_image(input))
-                # #Attempt at mouse click tracking
+                #Show the image chosen
+                input_element.set_size((input.width, input.height))
+                input_element.change_coordinates(graph_bottom_left = (0, input.height), graph_top_right = (input.width, 0))
+                input_element.draw_image(data=data, location=(0,0))
+
+                #Shows mask column section when complete
                 window['-MASK_COL-'].update(visible=True)
 
-                #temporary
+                #Temporary Code
                 window['-SHAPE_COL-'].update(visible=True)
 
+        #Checks for left click events in the 'Image'
         elif event == '-IMAGE-':
-            try:
-                x, y = values["-IMAGE-"]
-                #e = window['-IMAGE-'].user_bind_event
+            x, y = values["-IMAGE-"]
+            #Makes sure points are in the bounds of image
+            if x >= 0 and x<=500 and y >=0 and y<=500:
+                #See all of the added points for a mask
+                if  len(input_list) == 0 and x!='' and y!='':
+                    input_list = [(x, y)]
+                    label_list = [1]
+                elif x != '' and y != '':
+                    input_list.append(tuple([x,y])) 
+                    label_list.append(1)
 
-                #location = (x-28, y+28) 
-                # window['-COORD-'].update(f'({e.x}, {e.y})')
-                print(x)
-                print(y)
-            except:
-                print("Err")
-                pass
+                mask_point_string = f"{mask_point_string}[{x},{y}] "
 
-        elif event == 'View Point':
-            x = values['-XCoord-']
-            y = values['-YCoord-']
-            #See the points in the image
-            if x != '' and y != '':
-                temp_list =  np.array([[int(x), int(y)]])
-                draw_figure(input_element, show_point_fig(input, temp_list))
-
-        elif event == 'Add Point':
-            x = int(values['-XCoord-'])
-            y = int(values['-YCoord-'])
-            #See all of the added points for a mask
-            if  len(input_list) == 0 and x!='' and y!='':
-                input_list = [(x, y)]
-            
-            elif x != '' and y != '':
-                input_list.append(tuple([x,y]))
-
-            mask_point_string = f"{mask_point_string}[{x},{y}] "
-            print(mask_point_string)
-            temp_list = np.array(input_list)
-
-            draw_figure(input_element, show_point_fig(input, temp_list))
+                temp_array = np.array(input_list)
+                temp_label_array= np.array(label_list)
+                draw_figure(output_element, show_point_fig(input, temp_array, temp_label_array))
+    
+        #Checks for right click events in the 'Image'
+        elif event == '-IMAGE-+RIGHT+':
+            x, y = values["-IMAGE-"]
+            #Makes sure points are in the bounds of image
+            if x >= 0 and x<=500 and y >=0 and y<=500:
+                #See all of the added points for a mask
+                if  len(input_list) == 0 and x!='' and y!='':
+                    input_list = [(x, y)]
+                    label_list = [0]
+                elif x != '' and y != '':
+                    input_list.append(tuple([x,y])) 
+                    label_list.append(0)
+                mask_point_string = f"{mask_point_string}[{x},{y}] "
+                temp_list = np.array(input_list )
+                temp_label_list= np.array(label_list)
+                draw_figure(output_element, show_point_fig(input, temp_list, temp_label_list))
+    
+        #Clears the points made
+        elif event == 'Clear':
+            #Resets point related variables
+            input_list = []
+            label_list = []
+            mask_point_string = ''
+            #Shows clear image
+            draw_figure(output_element, show_image(input))
         
         elif event == 'View Mask':
-            x = values['-XCoord-']
-            y = values['-YCoord-']
-            #See the points
-            if x != '' and y != '' and len(input_list) != 0:
-                input_label = np.ones(len(input_list))
-                print(len(input_list))
-                print(input_label)
-
+            #Checks if point list isn't empty
+            if len(input_list) != 0:
                 hwc = np.array(input)
                 predictor.set_image(hwc)
                 temp_list = np.array(input_list)
 
+                #Creates a mask based on points
                 masks, scores, logits = predictor.predict(
                     point_coords = temp_list,
-                    point_labels = input_label,
+                    point_labels = label_list,
                     multimask_output = False
                 )
 
-                draw_figure(input_element, view_mask(temp_list, hwc, masks, scores, logits))
+                #Saves the mask and scores output for future use
+                temp_mask = masks
+                temp_scores = scores
+
+                draw_figure(output_element, view_mask(temp_list, hwc, masks, scores, logits))
                 
         elif event=='Add Mask':
-            input_label = np.ones(len(input_list))
-            print(input_label)
-
-            hwc = np.array(input)
-            predictor.set_image(hwc)
-            temp_list = np.array(input_list)
-
-            masks, scores, logits = predictor.predict(
-                point_coords = temp_list,
-                point_labels = input_label,
-                multimask_output = False
-            )
-            # Update masks fields with its points ('-MASK_LIST-')
-            # window['-MASK_LIST-'].update(str(temp_list))
-
             # Add onto mask list 
-            mask_list.append(add_mask(masks, scores, logits))
+            mask_list.append(add_mask(temp_mask, temp_scores))
             mask_list_string = f"{mask_list_string}Mask {maskindex}: {mask_point_string} \n"
-            #print(mask_list_string)
 
             window['-MASK_LIST-'].update(mask_list_string)
 
-            #draw the figure onto the image element
-            draw_figure(input_element, view_mask(temp_list, hwc, masks, scores, logits))
+            # Draw the figure onto the image element
+            draw_figure(output_element, view_mask(temp_list, hwc, masks, scores, logits))
             
-            #Empty the point list
-            input_list=[]
+            # Resets variables
+            input_list = []
+            label_list = []
             mask_point_string = ''
+            temp_mask = ''
+            temp_scores = ''
             maskindex = maskindex + 1
-
-        elif event=='Undo':
-            # Remove 1 mask from the list
-            print("UNDO")
 
         elif event=='Reset':
             # Reset the whole thing
-            print("RESET")
+            input_list = []
+            label_list = []
+            mask_list = []
+            mask_point_string = ''
+            temp_mask = ''
+            temp_scores = ''
+            maskindex = 1
+
+            mask_list_string = ''
+            #Update elements to clear masks
+            window['-MASK_LIST-'].update(mask_list_string)
+            window['-SHAPE_COL-'].update(visible=False)
 
         elif event=='Save':
-            # Delete & Save the masks chosen
-            masks = np.array(mask_list)
-            delete_all_masks()
-            #Loops through the masks, creates a convex hull mask and saves them in a masks folder
-            for index in range(len(masks)):
-                #chull = convex_hull_image(masks[index], include_borders = True, tolerance=1000)
-                #im = Image.fromarray(chull)
-                im = Image.fromarray(masks[index])
-                i = str(index)
+            # Save the masks chosen
+            if len(mask_list) != 0:
 
-                if len(str(index)) < 2:
-                    i= '0'+str(index)
-                im.save("masks/m"+ i +".jpg")
-
-            #Shows the shape column
-            window['-SHAPE_COL-'].update(visible=True)
+                masks = np.array(mask_list)
+                delete_all_masks()
+                #Loops through the masks, creates a convex hull mask and saves them in a masks folder
+                for index in range(len(masks)):
+                    a = morphology.remove_small_objects(masks[index], 10, connectivity=2)
+                    chull = morphology.convex_hull_image(a, include_borders = True, tolerance=10)
+                    im = Image.fromarray(chull)
+                    # im = Image.fromarray(masks[index])
+                    i = str(index)
+    
+                    if len(str(index)) < 2:
+                        i= '0'+str(index)
+                    im.save("masks/m"+ i +".jpg")
+    
+                #Shows the shape column
+                window['-SHAPE_COL-'].update(visible=True)
 
         ## Shape Events
         elif event=='Best Poly':
-            # Save the final output figure
-            output = best_poly_IoU(input)
-            draw_figure(input_element, output)
-            print("IoU")
+            # Fits Polygons to 
+            output = best_poly_IoU()
+            draw_figure(output_element, output)
 
         elif event=='Primitive':
-            # Save the final output figure
-            output = best_primitive(input)
-            draw_figure(input_element, output)
-            print("Primitive")
+            # Fits primitive shapes to saved masks
+            output = best_primitive()
+            draw_figure(output_element, output)
 
         elif event=='Save Output':
             # Save the final output figure
-            print("SAVE OUTPUT")
+            if output !='':
+                filename = sg.popup_get_file('Choose file (PNG, JPG, GIF) to save to', save_as=True)
+                save_element_as_file(window['-OUTPUT-'], filename)
             
     window.close()
 
 if __name__ == '__main__':
+    os.system("pip install git+https://github.com/facebookresearch/segment-anything.git")
     main()
